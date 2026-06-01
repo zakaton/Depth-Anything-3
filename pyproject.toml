@@ -21,7 +21,6 @@ dependencies = [
     "imageio",
     "numpy<2",
     "opencv-python",
-    "xformers",
     "open3d",
     "fastapi",
     "uvicorn",
@@ -39,6 +38,7 @@ dependencies = [
     "moviepy==1.0.3",
     "typer>=0.9.0",
     "pycolmap",
+    "websockets",
 ]
 
 [project.optional-dependencies]

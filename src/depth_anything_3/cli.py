@@ -22,6 +22,16 @@ from __future__ import annotations
 import os
 import typer
 
+import asyncio
+import websockets
+from io import BytesIO
+from PIL import Image
+import torch
+import numpy as np
+import cv2
+import struct
+
+from depth_anything_3.api import DepthAnything3
 from depth_anything_3.services import start_server
 from depth_anything_3.services.gallery import gallery as gallery_main
 from depth_anything_3.services.inference_service import run_inference
@@ -40,7 +50,8 @@ from depth_anything_3.utils.constants import (
     DEFAULT_MODEL,
 )
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 app = typer.Typer(help="Depth Anything 3 - Video depth estimation CLI", add_completion=False)
 
@@ -380,12 +391,74 @@ def image(
         process_res_method=process_res_method,
         export_feat_layers=export_feat_layers,
         use_ray_pose=use_ray_pose,
-        reference_view_strategy=reference_view_strategy,
+        ref_view_strategy=ref_view_strategy,
         conf_thresh_percentile=conf_thresh_percentile,
         num_max_points=num_max_points,
         show_cameras=show_cameras,
         feat_vis_fps=feat_vis_fps,
     )
+
+
+def decode_jpeg(data: bytes):
+    return Image.open(BytesIO(data)).convert("RGB")
+
+
+device = torch.device("mps")
+model = DepthAnything3.from_pretrained("depth-anything/da3metric-large")
+model = model.to(device).eval()
+
+
+async def ws_handler(ws):
+    print("[ws] client connected")
+
+    async for msg in ws:
+        try:
+            img = decode_jpeg(msg)
+
+            with torch.no_grad():
+                pred = model.inference([img])
+
+            depth = pred.depth[0]
+
+            # -----------------------
+            # closest depth (robust)
+            # -----------------------
+            closest = float(np.percentile(depth, 1))
+            print("closest:", closest)
+
+            # -----------------------
+            # convert depth → JPEG
+            # -----------------------
+            depth = depth - depth.min()
+            depth = depth / (depth.max() + 1e-6)
+            depth_u8 = (depth * 255).astype(np.uint8)
+
+            _, jpg = cv2.imencode(".jpg", depth_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+
+            jpg_bytes = jpg.tobytes()
+            jpg_size = len(jpg_bytes)
+
+            # -----------------------
+            # pack binary message
+            # -----------------------
+            header = struct.pack("<fI", closest, jpg_size)
+
+            await ws.send(header + jpg_bytes)
+
+        except Exception as e:
+            print("error:", e)
+            await ws.send(b"")
+
+
+async def run_server():
+    print("[server] starting on ws://localhost:8765")
+    async with websockets.serve(ws_handler, "localhost", 8765):
+        await asyncio.Future()  # run forever
+
+
+@app.command()
+def server():
+    asyncio.run(run_server())
 
 
 @app.command()
@@ -459,7 +532,7 @@ def images(
         process_res_method=process_res_method,
         export_feat_layers=export_feat_layers,
         use_ray_pose=use_ray_pose,
-        reference_view_strategy=reference_view_strategy,
+        ref_view_strategy=ref_view_strategy,
         conf_thresh_percentile=conf_thresh_percentile,
         num_max_points=num_max_points,
         show_cameras=show_cameras,
@@ -546,7 +619,7 @@ def colmap(
         intrinsics=intrinsics,
         align_to_input_ext_scale=align_to_input_ext_scale,
         use_ray_pose=use_ray_pose,
-        reference_view_strategy=reference_view_strategy,
+        ref_view_strategy=ref_view_strategy,
         conf_thresh_percentile=conf_thresh_percentile,
         num_max_points=num_max_points,
         show_cameras=show_cameras,
@@ -623,7 +696,7 @@ def video(
         process_res_method=process_res_method,
         export_feat_layers=export_feat_layers,
         use_ray_pose=use_ray_pose,
-        reference_view_strategy=reference_view_strategy,
+        ref_view_strategy=ref_view_strategy,
         conf_thresh_percentile=conf_thresh_percentile,
         num_max_points=num_max_points,
         show_cameras=show_cameras,
